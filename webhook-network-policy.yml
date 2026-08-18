@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-machine-webhook
+  namespace: openshift-machine-api
+spec:
+  podSelector:
+    matchLabels:
+      app: machine-taint-webhook
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8443
+  policyTypes:
+    - Ingress
