@@ -286,6 +286,19 @@ podman push ${REGISTRY_URL}
 
 ## Step 2: Deployment & Configuration
 
+Deploying the webhook into the `openshift-machine-api` namespace requires specific OpenShift annotations and network policies to ensure secure HTTPS communication and cluster connectivity.
+
+### Manifest Breakdown & Architectural Requirements
+
+| Component | Resource | Purpose & Why It Is Required |
+| :--- | :--- | :--- |
+| **Pull Credentials** | `Secret` & `ServiceAccount` | Authorizes pod image pulls from private registries. Linking to the `default` ServiceAccount avoids inline `imagePullSecrets` modifications. |
+| **Webhook Service Annotation** | `Service` | **Required for TLS Certificate Generation:** Annotating the Service with `service.beta.openshift.io/serving-cert-secret-name` triggers OpenShift's `service-ca` operator to automatically generate a TLS cert/key pair in Secret `machine-taint-webhook-tls`. |
+| **Ingress NetworkPolicy** | `NetworkPolicy` | **Required for Network Access:** The `openshift-machine-api` namespace enforces strict default-deny network rules. Without explicitly permitting ingress TCP traffic on port `8443`, calls from the API server hit a 10s deadline timeout. |
+| **MutatingWebhook Registration** | `MutatingWebhookConfiguration` | **Required for CA Trust Chain:** Intercepts `CREATE` operations on `Machine` resources. Annotated with `service.beta.openshift.io/inject-cabundle: "true"` so OpenShift automatically populates the `caBundle` trust field. |
+
+---
+
 ### 1. Cluster Pull Credentials
 
 Create the pull secret in `openshift-machine-api` and link it to the default `ServiceAccount`:
@@ -301,12 +314,11 @@ oc create secret docker-registry quay-pull-secret \
 oc secrets link default quay-pull-secret --for=pull -n openshift-machine-api  
 ```
 
-> [!NOTE]
-> Linking the secret directly to the default `ServiceAccount` ensures all pods in `openshift-machine-api` inherit registry access without requiring inline `imagePullSecrets` modifications across manifests.
+---
 
 ### 2. Application Manifests (`webhook-deployment.yaml`)
 
-This bundle includes the Deployment, Service (annotated for OpenShift TLS injection), and NetworkPolicy (bypassing `openshift-machine-api` default-deny):
+This bundle provisions the workload, network endpoints, security policies, and TLS certificate generation.
 
 ```yaml
 apiVersion: apps/v1  
@@ -346,6 +358,8 @@ metadata:
   name: machine-taint-webhook-service  
   namespace: openshift-machine-api  
   annotations:  
+    # REQUIRED: Tells OpenShift service-ca operator to create secret "machine-taint-webhook-tls" 
+    # containing signed tls.crt and tls.key files.
     service.beta.openshift.io/serving-cert-secret-name: machine-taint-webhook-tls  
 spec:  
   ports:  
@@ -364,6 +378,8 @@ spec:
     matchLabels:  
       app: machine-taint-webhook  
   ingress:  
+    # REQUIRED: Opens port 8443 through openshift-machine-api default-deny firewall.
+    # Prevents "context deadline exceeded (10s timeout)" errors during API interception.
     - ports:  
         - protocol: TCP  
           port: 8443  
@@ -371,9 +387,19 @@ spec:
     - Ingress  
 ```
 
+#### Why These Resources Are Configured This Way:
+
+* **Why Service Annotation is Required (`service.beta.openshift.io/serving-cert-secret-name`):**  
+  Kubernetes Mutating Webhooks **must** communicate over HTTPS. Instead of manually deploying `cert-manager` or managing custom SSL certificates, this annotation instructs OpenShift's internal `service-ca` operator to automatically issue a trusted TLS certificate authority and server certificate, binding them directly to Secret `machine-taint-webhook-tls`. The webhook Deployment then mounts this Secret to `/etc/webhook/certs`.
+
+* **Why NetworkPolicy is Required (`allow-ingress-machine-webhook`):**  
+  Core OpenShift namespaces like `openshift-machine-api` run default-deny NetworkPolicies for platform hardening. Without this `NetworkPolicy` explicitly allowing ingress on port `8443`, packets sent from the Kubernetes API server to the webhook pod are dropped, causing API scale operations to fail with `failed calling webhook: context deadline exceeded`.
+
+---
+
 ### 3. Mutating Webhook Registration (`webhook-config.yaml`)
 
-Registers the admission hook with `service.beta.openshift.io/inject-cabundle` so the API server auto-populates the `caBundle` field:
+Registers the admission endpoint with the OpenShift Control Plane.
 
 ```yaml
 apiVersion: admissionregistration.k8s.io/v1  
@@ -381,6 +407,7 @@ kind: MutatingWebhookConfiguration
 metadata:  
   name: machine-taint-injector-webhook  
   annotations:  
+    # REQUIRED: Tells OpenShift service-ca operator to auto-inject cluster CA bundle into caBundle.
     service.beta.openshift.io/inject-cabundle: "true"  
 webhooks:  
   - name: taint-injector.zero-trust.io  
@@ -400,7 +427,15 @@ webhooks:
     failurePolicy: Fail  
 ```
 
-Apply all manifests to the cluster:
+#### Why CA Bundle Injection is Required (`service.beta.openshift.io/inject-cabundle`):
+
+For the Kubernetes API Server to validate the TLS certificate presented by `machine-taint-webhook-service`, it requires a valid CA certificate in `clientConfig.caBundle`. Setting this annotation instructs OpenShift to automatically populate the `caBundle` field with the cluster’s internal CA, completing the end-to-end TLS trust chain.
+
+---
+
+### Apply Manifests
+
+Apply the deployment and registration files to the cluster:
 
 ```bash
 oc apply -f webhook-deployment.yaml  

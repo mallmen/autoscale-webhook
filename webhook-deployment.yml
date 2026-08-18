@@ -34,9 +34,27 @@ kind: Service
 metadata:
   name: machine-taint-webhook-service
   namespace: openshift-machine-api
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: machine-taint-webhook-tls
 spec:
   ports:
     - port: 443
       targetPort: 8443
   selector:
     app: machine-taint-webhook
+--
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-machine-webhook
+  namespace: openshift-machine-api
+spec:
+  podSelector:
+    matchLabels:
+      app: machine-taint-webhook
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8443
+  policyTypes:
+    - Ingress
