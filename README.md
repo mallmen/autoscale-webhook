@@ -1,10 +1,3 @@
-The issue you are seeing happens because Markdown renderers break when code blocks are nested inside other code blocks. When I put code blocks (like `go, `yaml, or `bash) inside the main code block, your Markdown preview closes the outer block early at the first ` it sees, causing everything after it to render as plain text!
-
-To fix this and provide the **entire, complete README.md from top to bottom**, here is the document with inner code fences escaped using backticks (`\``` `).
-
-You can safely copy the block below directly into your repository's `README.md` file:
-
-```markdown
 # OpenShift Machine API Mutating Admission Webhook  
   
 ![OpenShift](https://img.shields.io/badge/OpenShift-4.x-red?logo=redhatopenshift)  
@@ -460,5 +453,3 @@ taints:
 | `ErrImagePull` / `ImagePullBackOff` | Container image hosted in private registry without cluster pull credentials. | Created `quay-pull-secret` and linked to default `ServiceAccount` via `oc secrets link`. |
 | `failed calling webhook: context deadline exceeded (10s timeout)` | OpenShift `openshift-machine-api` namespace enforces default-deny `NetworkPolicy`. | Applied custom `NetworkPolicy` (`allow-ingress-machine-webhook`) opening TCP port 8443 to the webhook deployment. |
 | `http2: panic serving: runtime error: invalid memory address or nil pointer dereference` | `AdmissionReview.Request` evaluated to nil on health checks or non-admission requests. | Added strict nil checks (`if req == nil / len(req.Object.Raw) == 0`) before unmarshaling payloads. |
-
-```
