@@ -314,6 +314,9 @@ oc create secret docker-registry quay-pull-secret \
 oc secrets link default quay-pull-secret --for=pull -n openshift-machine-api  
 ```
 
+[!NOTE]
+Create this secret as approprirate if required for the cluster's container registry.  If the repository is public, skip this step.
+
 ---
 
 ### 2. Application Manifests (`webhook-deployment.yaml`)
