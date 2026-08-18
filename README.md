@@ -101,7 +101,29 @@ webhook-project/
 
 ## Step 1: Webhook Implementation & Build
 
-### Go Source Code (`main.go`)
+### 1. Initialize Go Module & Dependencies (`go.mod` & `go.sum`)
+
+Before compiling or building the container image, initialize the Go module and download the Kubernetes admission library dependencies to generate `go.mod` and `go.sum`.
+
+```bash
+# Initialize the Go module
+go mod init autoscale-webhook
+
+# Add required Kubernetes & OpenShift API dependencies
+go get k8s.io/api/admission/v1 \
+       k8s.io/apimachinery/pkg/apis/meta/v1 \
+       k8s.io/apimachinery/pkg/runtime \
+       k8s.io/apimachinery/pkg/runtime/serializer
+
+# Tidy and generate the go.sum dependency lockfile
+go mod tidy
+```
+
+> [!NOTE]
+> Download the built artifacts or run these steps manually to ensure the files are up to date.
+
+---
+### 2. Go Source Code (`main.go`)
 
 The handler unmarshals incoming AdmissionReview requests, validates payload integrity, and generates a JSON Patch adding the quarantine taint:
 
@@ -250,7 +272,7 @@ func main() {
 }  
 ```
 
-### Multi-Stage Container Build (`Dockerfile`)
+### 3. Multi-Stage Container Build (`Dockerfile`)
 
 Builds using Red Hat Enterprise Linux UBI Toolset and outputs a UBI Minimal runtime image:
 
@@ -275,6 +297,8 @@ USER 65532:65532
 ENTRYPOINT ["/webhook"]  
 ```
 
+### 4. Build and Push Container Image
+
 ```bash
 # Set target registry tag  
 REGISTRY_URL="quay.io/your-org/machine-taint-webhook:latest"  
@@ -283,6 +307,9 @@ REGISTRY_URL="quay.io/your-org/machine-taint-webhook:latest"
 podman build -t ${REGISTRY_URL} .  
 podman push ${REGISTRY_URL}  
 ```
+
+> [!NOTE]
+> Set REGISTRY_URL to your container registry.
 
 ## Step 2: Deployment & Configuration
 
@@ -315,7 +342,7 @@ oc secrets link default quay-pull-secret --for=pull -n openshift-machine-api
 ```
 
 > [!NOTE]
-> Create this secret as approprirate if required for the cluster's container registry.  If the repository is public, skip this step.
+> Create this secret as approprirate for your container registry.  If the repository is public, skip this step.
 
 ---
 
