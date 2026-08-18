@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: machine-taint-webhook
+  namespace: openshift-machine-api
+  labels:
+    app: machine-taint-webhook
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: machine-taint-webhook
+  template:
+    metadata:
+      labels:
+        app: machine-taint-webhook
+    spec:
+      containers:
+        - name: webhook
+          image: quay.io/mallmen/machine-taint-webhook:latest
+          ports:
+            - containerPort: 8443
+          volumeMounts:
+            - name: webhook-certs
+              mountPath: /etc/webhook/certs
+              readOnly: true
+      volumes:
+        - name: webhook-certs
+          secret:
+            secretName: machine-taint-webhook-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: machine-taint-webhook-service
+  namespace: openshift-machine-api
+spec:
+  ports:
+    - port: 443
+      targetPort: 8443
+  selector:
+    app: machine-taint-webhook

@@ -1,0 +1,22 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: machine-taint-injector-webhook
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+webhooks:
+  - name: taint-injector.zero-trust.io
+    rules:
+      - apiGroups: ["machine.openshift.io"]
+        apiVersions: ["v1beta1"]
+        operations: ["CREATE"]
+        resources: ["machines"]
+        scope: "Namespaced"
+    clientConfig:
+      service:
+        name: machine-taint-webhook-service
+        namespace: openshift-machine-api
+        path: "/mutate"
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Fail
