@@ -2,9 +2,11 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 
 	admissionv1 "k8s.io/api/admission/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -12,11 +14,41 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 )
 
+type Config struct {
+	TaintKey    string
+	TaintValue  string
+	TaintEffect string
+	Port        string
+	TLSCertPath string
+	TLSKeyPath  string
+	MutatePath  string
+}
+
 var (
 	runtimeScheme = runtime.NewScheme()
 	codecs        = serializer.NewCodecFactory(runtimeScheme)
 	deserializer  = codecs.UniversalDeserializer()
+	cfg           Config
 )
+
+func init() {
+	cfg = Config{
+		TaintKey:    getEnv("TAINT_KEY", "network.zero-trust.io/firewall-unverified"),
+		TaintValue:  getEnv("TAINT_VALUE", "true"),
+		TaintEffect: getEnv("TAINT_EFFECT", "NoSchedule"),
+		Port:        getEnv("PORT", "8443"),
+		TLSCertPath: getEnv("TLS_CERT_PATH", "/etc/webhook/certs/tls.crt"),
+		TLSKeyPath:  getEnv("TLS_KEY_PATH", "/etc/webhook/certs/tls.key"),
+		MutatePath:  getEnv("MUTATE_PATH", "/mutate"),
+	}
+}
+
+func getEnv(key, defaultValue string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultValue
+}
 
 type MachineSpec struct {
 	Taints []Taint `json:"taints,omitempty"`
@@ -77,11 +109,11 @@ func mutateHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Define the zero-trust quarantine taint[cite: 1]
+	// Define the zero-trust quarantine taint using configurable options
 	targetTaint := Taint{
-		Key:    "network.zero-trust.io/firewall-unverified",
-		Value:  "true",
-		Effect: "NoSchedule",
+		Key:    cfg.TaintKey,
+		Value:  cfg.TaintValue,
+		Effect: cfg.TaintEffect,
 	}
 
 	var patches []PatchOperation
@@ -135,9 +167,10 @@ func mutateHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	http.HandleFunc("/mutate", mutateHandler)
-	log.Println("Starting mutating webhook server on port 8443...")
-	if err := http.ListenAndServeTLS(":8443", "/etc/webhook/certs/tls.crt", "/etc/webhook/certs/tls.key", nil); err != nil {
+	http.HandleFunc(cfg.MutatePath, mutateHandler)
+	addr := fmt.Sprintf(":%s", cfg.Port)
+	log.Printf("Starting mutating webhook server on port %s using path %s...", cfg.Port, cfg.MutatePath)
+	if err := http.ListenAndServeTLS(addr, cfg.TLSCertPath, cfg.TLSKeyPath, nil); err != nil {
 		log.Fatalf("Failed to listen and serve: %v", err)
 	}
 }

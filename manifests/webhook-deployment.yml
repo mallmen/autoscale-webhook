@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: webhook
-          image: quay.io/mallmen/machine-taint-webhook:latest
+          image: quay.io/mallmen/machine-taint-webhook:v1.1.0
           ports:
             - containerPort: 8443
           volumeMounts:
@@ -42,7 +42,7 @@ spec:
       targetPort: 8443
   selector:
     app: machine-taint-webhook
---
+---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

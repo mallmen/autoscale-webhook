@@ -1,0 +1,74 @@
+---
+- name: OpenShift Node Firewall Onboarding Workflow
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    node_name: "{{ target_node_name }}"
+    validate_certs: false
+
+  tasks:
+    # --- 1. VARIABLE VALIDATION ---
+    - name: Validate that target_node_name is provided
+      ansible.builtin.assert:
+        that:
+          - target_node_name is defined
+          - target_node_name | string | length > 0
+        fail_msg: "FATAL ERROR: 'target_node_name' variable must be defined and non-empty (e.g., -e 'target_node_name=ocp4-hvdbk-worker-0-hpqmj')."
+        success_msg: "Target node variable confirmed: {{ target_node_name }}"
+
+    # --- 2. CLUSTER RESOURCE INFORMATION GATHERING ---
+    - name: Fetch Node details from cluster
+      kubernetes.core.k8s_info:
+        validate_certs: "{{ validate_certs }}"
+        api_version: v1
+        kind: Node
+        name: "{{ node_name }}"
+      register: node_info
+
+    - name: Validate that the Node exists in the target cluster
+      ansible.builtin.assert:
+        that:
+          - node_info.resources | length > 0
+        fail_msg: "FATAL ERROR: Node '{{ node_name }}' was not found in the target OpenShift cluster."
+        success_msg: "Verified Node '{{ node_name }}' exists in the cluster."
+
+    - name: Fetch Machine details from cluster
+      kubernetes.core.k8s_info:
+        validate_certs: "{{ validate_certs }}"
+        api_version: machine.openshift.io/v1beta1
+        kind: Machine
+        namespace: openshift-machine-api
+        name: "{{ node_name }}"
+      register: machine_info
+
+    # --- 3. MACHINE TAINT REMOVAL ---
+    - name: Clear taints from Machine resource
+      kubernetes.core.k8s_json_patch:
+        validate_certs: "{{ validate_certs }}"
+        api_version: machine.openshift.io/v1beta1
+        kind: Machine
+        namespace: openshift-machine-api
+        name: "{{ node_name }}"
+        patch:
+          - op: replace
+            path: /spec/taints
+            value: []
+      when:
+        - machine_info.resources | length > 0
+        - "(machine_info.resources[0].spec.taints | default([])) | length > 0"
+
+    # --- 4. NODE TAINT REMOVAL ---
+    - name: Clear taints from Node resource
+      kubernetes.core.k8s_json_patch:
+        validate_certs: "{{ validate_certs }}"
+        api_version: v1
+        kind: Node
+        name: "{{ node_name }}"
+        patch:
+          - op: replace
+            path: /spec/taints
+            value: []
+      when:
+        - "(node_info.resources[0].spec.taints | default([])) | length > 0"
