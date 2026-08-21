@@ -3,109 +3,75 @@ import time
 import logging
 from kubernetes import client, config, watch
 
+# Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-TARGET_TAINT_KEY = "network.zero-trust.io/firewall-unverified"
-TARGET_TAINT_VAL = "true"
-JOB_NAMESPACE = os.getenv("WATCHER_NAMESPACE", "openshift-machine-api")
+# Load cluster config
+try:
+    config.load_incluster_config()
+except Exception:
+    config.load_kube_config()
 
-# In-memory tracking to avoid spawning duplicate Jobs for the same node
+v1 = client.CoreV1Api()
+batch_v1 = client.BatchV1Api()
+
+# Environment settings
+WATCHER_NAMESPACE = os.getenv("WATCHER_NAMESPACE", "autoscale-node-automation")
+AAP_HOST = os.getenv("AAP_HOST", "aap.ipa.mikea.net")
+WORKFLOW_ID = os.getenv("WORKFLOW_ID", "38")
+TAINT_KEY = "network.zero-trust.io/firewall-unverified"
+
 processed_nodes = set()
 
 def is_node_ready(node):
-    """Check if Node condition Ready is True."""
-    for cond in node.status.conditions or []:
-        if cond.type == "Ready" and cond.status == "True":
+    """Check if Node condition status is Ready == True."""
+    for condition in node.status.conditions or []:
+        if condition.type == "Ready" and condition.status == "True":
             return True
     return False
 
 def has_quarantine_taint(node):
-    """Check if Node has the zero-trust webhook taint."""
+    """Check if node contains the quarantine taint."""
     for taint in node.spec.taints or []:
-        if taint.key == TARGET_TAINT_KEY and taint.value == TARGET_TAINT_VAL:
+        if taint.key == TAINT_KEY:
             return True
     return False
 
 def get_node_ip(node):
-    """Extract InternalIP from Node status."""
+    """Extract InternalIP address from Node status."""
     for addr in node.status.addresses or []:
         if addr.type == "InternalIP":
             return addr.address
-    return "Unknown"
+    return None
 
-def trigger_onboarding_job(batch_v1, node_name, node_ip):
-    """Spawn a dedicated Kubernetes Job to perform AAP onboarding and untaint the node."""
-    job_name = f"aap-onboard-{node_name}"
-    
-    # Sanitize job name for k8s naming rules
-    job_name = job_name.lower().replace(".", "-")
-
+def trigger_onboarding_job(node_name, node_ip):
+    """Spawn a Kubernetes Job that mounts token from aap-secret and triggers AAP."""
     job_manifest = {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
-            "name": job_name,
-            "namespace": JOB_NAMESPACE,
-            "labels": {
-                "app": "aap-node-onboarding",
-                "target-node": node_name
-            }
+            "name": f"aap-onboard-{node_name}",
+            "namespace": WATCHER_NAMESPACE,
+            "labels": {"app": "aap-node-onboarding"}
         },
         "spec": {
-            "ttlSecondsAfterFinished": 300,  # Automatically clean up Job 5 mins after completion
-            "backoffLimit": 3,
+            "backoffLimit": 0,
+            "ttlSecondsAfterFinished": 300,
             "template": {
                 "metadata": {
-                    "labels": {
-                        "app": "aap-node-onboarding"
-                    }
+                    "labels": {"app": "aap-node-onboarding"}
                 },
                 "spec": {
-                    "serviceAccountName": "aap-onboarding-job-sa",
-                    "restartPolicy": "OnFailure",
+                    "restartPolicy": "Never",
                     "containers": [{
-                        "name": "onboard-and-untaint",
+                        "name": "aap-trigger",
                         "image": "registry.access.redhat.com/ubi9/ubi-minimal:latest",
                         "command": ["/bin/sh", "-c"],
-                        "args": [
-                            f"""
-                            echo "========================================="
-                            echo "Starting Onboarding Job for Node: {node_name} (IP: {node_ip})"
-                            echo "========================================="
-
-                            # 1. Trigger AAP REST API
-                            echo "[+] Calling AAP Workflow Template..."
-                            RESPONSE=$(curl -sk -X POST "https://${{AAP_HOST}}/api/v2/workflow_job_templates/${{WORKFLOW_ID}}/launch/" \
-                              -H "Authorization: Bearer ${{AAP_TOKEN}}" \
-                              -H "Content-Type: application/json" \
-                              -d "{{\"extra_vars\": {{\"target_node_name\": \"{node_name}\", \"target_node_ip\": \"{node_ip}\"}}}}")
-
-                            echo "AAP Launch Response: $RESPONSE"
-
-                            # 2. Clear Quarantine Taint from Machine & Node
-                            echo "[+] Removing quarantine taint from Machine and Node..."
-                            TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
-                            
-                            # Patch Node
-                            curl -sk -X PATCH \
-                              -H "Authorization: Bearer $TOKEN" \
-                              -H "Content-Type: application/json-patch+json" \
-                              "https://kubernetes.default.svc/api/v1/nodes/{node_name}" \
-                              -d '[{{"op": "replace", "path": "/spec/taints", "value": []}}]'
-
-                            # Patch Machine
-                            curl -sk -X PATCH \
-                              -H "Authorization: Bearer $TOKEN" \
-                              -H "Content-Type: application/json-patch+json" \
-                              "https://kubernetes.default.svc/apis/machine.openshift.io/v1beta1/namespaces/openshift-machine-api/machines/{node_name}" \
-                              -d '[{{"op": "replace", "path": "/spec/taints", "value": []}}]'
-
-                            echo "[SUCCESS] Node {node_name} onboarded and untainted successfully."
-                            """
-                        ],
                         "env": [
-                            {"name": "AAP_HOST", "value": os.getenv("AAP_HOST", "aap.example.com")},
-                            {"name": "WORKFLOW_ID", "value": os.getenv("WORKFLOW_ID", "42")},
+                            {"name": "AAP_HOST", "value": AAP_HOST},
+                            {"name": "WORKFLOW_ID", "value": WORKFLOW_ID},
+                            {"name": "TARGET_NODE", "value": node_name},
+                            {"name": "TARGET_IP", "value": node_ip},
                             {
                                 "name": "AAP_TOKEN",
                                 "valueFrom": {
@@ -115,6 +81,34 @@ def trigger_onboarding_job(batch_v1, node_name, node_ip):
                                     }
                                 }
                             }
+                        ],
+                        "args": [
+                            r"""
+                            echo "========================================="
+                            echo "Starting Onboarding Job for Node: ${TARGET_NODE} (IP: ${TARGET_IP})"
+                            echo "========================================="
+
+                            echo "[+] Calling AAP Workflow Template..."
+
+                            HTTP_CODE=$(curl -k -s -o /tmp/response.json -w "%{http_code}" --connect-timeout 10 --max-time 30 -X POST \
+                              "https://${AAP_HOST}/api/controller/v2/workflow_job_templates/${WORKFLOW_ID}/launch/" \
+                              -H "Authorization: Bearer ${AAP_TOKEN}" \
+                              -H "Content-Type: application/json" \
+                              -d "{\"extra_vars\": {\"target_node_name\": \"${TARGET_NODE}\", \"target_node_ip\": \"${TARGET_IP}\"}}")
+
+                            echo "AAP Response Code: ${HTTP_CODE}"
+                            echo "AAP Response Body:"
+                            cat /tmp/response.json
+                            echo ""
+
+                            if [ "${HTTP_CODE}" -eq 201 ] || [ "${HTTP_CODE}" -eq 200 ]; then
+                                echo "[SUCCESS] AAP Workflow launched successfully."
+                                exit 0
+                            else
+                                echo "[ERROR] AAP Workflow launch failed with HTTP status: ${HTTP_CODE}"
+                                exit 1
+                            fi
+                            """
                         ]
                     }]
                 }
@@ -123,45 +117,35 @@ def trigger_onboarding_job(batch_v1, node_name, node_ip):
     }
 
     try:
-        batch_v1.create_namespaced_job(namespace=JOB_NAMESPACE, body=job_manifest)
-        logging.info(f"Successfully spawned Job '{job_name}' for node {node_name}")
-        return True
-    except Exception as e:
+        batch_v1.create_namespaced_job(namespace=WATCHER_NAMESPACE, body=job_manifest)
+        logging.info(f"Created Job aap-onboard-{node_name} in namespace {WATCHER_NAMESPACE}")
+        processed_nodes.add(node_name)
+    except client.exceptions.ApiException as e:
         logging.error(f"Failed to create Job for node {node_name}: {e}")
-        return False
 
 def main():
-    logging.info("Starting Node Readiness Watcher...")
-    
-    try:
-        config.load_incluster_config()
-    except Exception:
-        config.load_kube_config()
-
-    v1 = client.CoreV1Api()
-    batch_v1 = client.BatchV1Api()
+    logging.info(f"Starting Node Readiness Watcher in namespace: {WATCHER_NAMESPACE}...")
     w = watch.Watch()
 
     while True:
         try:
-            for event in w.stream(v1.list_node, timeout_seconds=300):
+            for event in w.stream(v1.list_node):
                 node = event['object']
                 node_name = node.metadata.name
 
+                if node_name in processed_nodes:
+                    continue
+
                 if is_node_ready(node) and has_quarantine_taint(node):
-                    if node_name not in processed_nodes:
-                        node_ip = get_node_ip(node)
+                    node_ip = get_node_ip(node)
+                    if node_ip:
                         logging.info(f"Target node READY and TAINTED: {node_name} ({node_ip}). Launching Job...")
-                        
-                        if trigger_onboarding_job(batch_v1, node_name, node_ip):
-                            processed_nodes.add(node_name)
-                else:
-                    # Clear memory cache if node was untainted
-                    if node_name in processed_nodes and not has_quarantine_taint(node):
-                        processed_nodes.remove(node_name)
+                        trigger_onboarding_job(node_name, node_ip)
+                    else:
+                        logging.warning(f"Node {node_name} is Ready and Tainted, but InternalIP is missing.")
 
         except Exception as e:
-            logging.warning(f"Watch stream exception: {e}. Re-establishing stream in 5 seconds...")
+            logging.error(f"Watcher stream interrupted: {e}. Reconnecting in 5 seconds...")
             time.sleep(5)
 
 if __name__ == "__main__":

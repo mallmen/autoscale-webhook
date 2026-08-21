@@ -1,17 +1,23 @@
+# ==============================================================================
+# 1. SERVICE ACCOUNT & RBAC FOR THE WATCHER DEPLOYMENT
+# Allows watcher to stream Node events and spawn onboarding Jobs
+# ==============================================================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: node-readiness-watcher-sa
-  namespace: openshift-machine-api
+  namespace: autoscale-node-automation
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   name: node-readiness-watcher-role
 rules:
+  # Permission to watch Node state cluster-wide
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
+  # Permission to create and manage onboarding Jobs in autoscale-node-automation
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "create", "delete"]
@@ -23,49 +29,58 @@ metadata:
 subjects:
   - kind: ServiceAccount
     name: node-readiness-watcher-sa
-    namespace: openshift-machine-api
+    namespace: autoscale-node-automation
 roleRef:
   kind: ClusterRole
   name: node-readiness-watcher-role
   apiGroup: rbac.authorization.k8s.io
 ---
-# RBAC for the dynamically spawned Job to untaint the node
+# ==============================================================================
+# 2. SERVICE ACCOUNT & RBAC FOR AAP (USED BY ANSIBLE TO UNTAINT NODES/MACHINES)
+# Service Account used by AAP to authenticate back to OpenShift
+# ==============================================================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: aap-onboarding-job-sa
-  namespace: openshift-machine-api
+  name: aap-node-management-sa
+  namespace: autoscale-node-automation
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: aap-onboarding-job-role
+  name: aap-node-management-role
 rules:
   - apiGroups: [""]
     resources: ["nodes"]
-    verbs: ["get", "patch", "update"]
+    verbs: ["get", "list", "patch", "update"]
   - apiGroups: ["machine.openshift.io"]
     resources: ["machines"]
-    verbs: ["get", "patch", "update"]
+    verbs: ["get", "list", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
-  name: aap-onboarding-job-binding
+  name: aap-node-management-binding
 subjects:
   - kind: ServiceAccount
-    name: aap-onboarding-job-sa
-    namespace: openshift-machine-api
+    name: aap-node-management-sa
+    namespace: autoscale-node-automation
 roleRef:
   kind: ClusterRole
-  name: aap-onboarding-job-role
+  name: aap-node-management-role
   apiGroup: rbac.authorization.k8s.io
 ---
+# ==============================================================================
+# 3. WATCHER DEPLOYMENT
+# Runs Python script from ConfigMap and reads token from aap-secret
+# ==============================================================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: node-readiness-watcher
-  namespace: openshift-machine-api
+  namespace: autoscale-node-automation
+  labels:
+    app: node-readiness-watcher
 spec:
   replicas: 1
   selector:
@@ -79,7 +94,8 @@ spec:
       serviceAccountName: node-readiness-watcher-sa
       containers:
         - name: watcher
-          image: registry.access.redhat.com/ubi9/python-39:latest
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
           args:
             - |
@@ -87,11 +103,16 @@ spec:
               python -u /app/watcher.py
           env:
             - name: WATCHER_NAMESPACE
-              value: "openshift-machine-api"
+              value: "autoscale-node-automation"
             - name: AAP_HOST
-              value: "aap.example.com"
+              value: "aap.ipa.mikea.net"
             - name: WORKFLOW_ID
-              value: "42"
+              value: "38"
+            - name: AAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aap-secret
+                  key: token
           volumeMounts:
             - name: script
               mountPath: /app
