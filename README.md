@@ -838,6 +838,9 @@ Create an `OpenShift or Kubernetes API Bearer Token` Credential in AAP.  Set the
 
 ```bash
 oc logs -f -l app=machine-taint-webhook -n openshift-machine-api  
+oc logs -f deployment/node-readiness-watcher -n autoscale-node-automation
+oc get jobs -n autoscale-node-automation -w
+oc lops -n autoscale-node-automation -l app=app-node-onboarding -f
 ```
 
 ### 2. Scale Up Worker MachineSet
@@ -868,7 +871,11 @@ taints:
 ```
 
 > [!IMPORTANT]
-> The `Machine` resource will still transition to `Running` status normally. The `NoSchedule` taint restricts the Kubernetes Pod Scheduler from scheduling workloads until downstream validation succeeds.
+> The `Machine` resource will still transition to `Running` status normally. The `NoSchedule` taint restricts the Kubernetes Pod Scheduler from scheduling workloads until downstream validation succeeds. To validate the Taint on the Machine and  Node, check the resources before the Node reaches the `Ready` state or you may miss validating the Taint before AAP removes it.
+
+### 4. Verify AAP Workflow Execution and Removal of Taint from Node and Machine
+
+Observe that the new node is detected when fully ready by the watcher and the job is created to call AAP and run the workflow.
 
 ## Troubleshooting Matrix
 
