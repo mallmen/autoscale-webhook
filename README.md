@@ -10,22 +10,33 @@ When the OpenShift Cluster Autoscaler scales worker nodes, newly provisioned nod
   
 ---  
   
-## Table of Contents  
-  
-- [Overview](#overview)  
-- [Architecture & Workflow](#architecture--workflow)  
-- [Key Features](#key-features)  
-- [Project Structure](#project-structure)  
-- [Prerequisites](#prerequisites)  
-- [Step 1: Webhook Implementation & Build](#step-1-webhook-implementation--build)  
-  - [Go Source Code (`main.go`)](#go-source-code-maingo)  
-  - [Multi-Stage Container Build (`Dockerfile`)](#multi-stage-container-build-dockerfile)  
-- [Step 2: Deployment & Configuration](#step-2-deployment--configuration)  
-  - [1. Cluster Pull Credentials](#1-cluster-pull-credentials)  
-  - [2. Application Manifests (`webhook-deployment.yml`)](#2-application-manifests-webhook-deploymentyml)  
-  - [3. Mutating Webhook Registration (`webhook-config.yml`)](#3-mutating-webhook-registration-webhook-configyml)  
-- [Verification & Testing](#verification--testing)  
-- [Troubleshooting Matrix](#troubleshooting-matrix)  
+## Table of Contents
+
+- [Overview](#overview)
+- [Architecture & Workflow](#architecture--workflow)
+  - [3-Step Zero-Trust Lifecycle](#3-step-zero-trust-lifecycle)
+- [Key Features](#key-features)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Step 1: Webhook Implementation & Build](#step-1-webhook-implementation--build)
+  - [1. Initialize Go Module & Dependencies (`go.mod` & `go.sum`)](#1-initialize-go-module--dependencies-gomod--gosum)
+  - [2. Go Source Code (`main.go`)](#2-go-source-code-maingo)
+  - [3. Multi-Stage Container Build (`Dockerfile`)](#3-multi-stage-container-build-dockerfile)
+  - [4. Build and Push Container Image](#4-build-and-push-container-image)
+- [Step 2: Deployment & Configuration](#step-2-deployment--configuration)
+  - [Manifest Breakdown & Architectural Requirements](#manifest-breakdown--architectural-requirements)
+  - [1. Cluster Pull Credentials](#1-cluster-pull-credentials)
+  - [2. Application Manifests (`webhook-deployment.yml`)](#2-application-manifests-webhook-deploymentyml)
+  - [3. Mutating Webhook Registration (`webhook-config.yml`)](#3-mutating-webhook-registration-webhook-configyml)
+  - [4. Watcher Application Manifests (`watcher-and-job-rbac.yml`)](#4--watcher-application-manifests-watcher-and-job-rbacyml)
+  - [5. Watcher Python Script (`watcher.py`)](#5--watcher-python-script-watcherpy)
+  - [Apply Manifests](#apply-manifests)
+- [Verification & Testing](#verification--testing)
+  - [1. Tail Webhook Application Logs](#1-tail-webhook-application-logs)
+  - [2. Scale Up Worker MachineSet](#2-scale-up-worker-machineset)
+  - [3. Verify Taint Injection on Machine Object](#3-verify-taint-injection-on-machine-object)
+  - [4. Verify AAP Workflow Execution and Removal of Taint from Node and Machine](#4-verify-aap-workflow-execution-and-removal-of-taint-from-node-and-machine)
+- [Troubleshooting Matrix](#troubleshooting-matrix)
   
 ---  
   
