@@ -22,8 +22,8 @@ When the OpenShift Cluster Autoscaler scales worker nodes, newly provisioned nod
   - [Multi-Stage Container Build (`Dockerfile`)](#multi-stage-container-build-dockerfile)  
 - [Step 2: Deployment & Configuration](#step-2-deployment--configuration)  
   - [1. Cluster Pull Credentials](#1-cluster-pull-credentials)  
-  - [2. Application Manifests (`webhook-deployment.yaml`)](#2-application-manifests-webhook-deploymentyaml)  
-  - [3. Mutating Webhook Registration (`webhook-config.yaml`)](#3-mutating-webhook-registration-webhook-configyaml)  
+  - [2. Application Manifests (`webhook-deployment.yml`)](#2-application-manifests-webhook-deploymentyml)  
+  - [3. Mutating Webhook Registration (`webhook-config.yml`)](#3-mutating-webhook-registration-webhook-configyml)  
 - [Verification & Testing](#verification--testing)  
 - [Troubleshooting Matrix](#troubleshooting-matrix)  
   
@@ -80,27 +80,22 @@ In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot
 - **Automated TLS Integration:** Leverages OpenShift's native service-ca operator to handle certificate generation, signing, and CA bundle injection.
 - **Strict Security Compliance:** Configured with explicit NetworkPolicy ingress rules to function inside OpenShift's default-deny `openshift-machine-api` namespace.
 - **Defensive Runtime:** Guarded against nil-pointer panics caused by health probes or malformed API requests.
-- **
 
 ## Project Structure
 
 ```plaintext
-webhook-project/  
+autoscale-webhook/  
 ├── Containerfile                    # Containerfile to build Go HTTP server container
 ├── main.go                          # Go HTTP server handling AdmissionReview logic  
 ├── go.mod                           # Go module definition (v1.22+)  
 ├── go.sum                           # dependency lockfile  
 ├── manifests                        # 
-│    └── aap-sa-secret.yml           # OpenShift deployment, service, and networkPolicy  
-│    └── aap-secret.yml              # OpenShift deployment, service, and networkPolicy  
-│    └── namespace.yml               # OpenShift deployment, service, and networkPolicy  
-│    └── watcher-and-job-rbac.yml    # OpenShift deployment, service, and networkPolicy  
+│    └── watcher-and-job-rbac.yml    # OpenShift namespace, serviceaccounts, rbac, and deployment  
 │    └── webhook-deployment.yml      # OpenShift deployment, service, and networkPolicy  
 │    └── webhook-config.yml.yml      # OpenShift mutatingwebhookconfiguration manifest
 ├── playbooks                        # 
 │    └── remove-autoscale-taint.yml  # Ansible playbook to remove machine and node taint
-├── README.md                        # project documentation
-└── watcher.py                       # Python script watching OpenShift resources and triggering autoscale logic
+└── README.md                        # project documentation
 ```
 
 ## Prerequisites
@@ -108,6 +103,7 @@ webhook-project/
 - OpenShift Cluster (v4.x) with `cluster-admin` access.
 - OpenShift CLI (`oc`) installed.
 - Container engine (`podman` or `docker`).
+- Go programming tools installed for initial build
 - Access to an enterprise container registry (e.g., Quay.io).
 
 ## Step 1: Webhook Implementation & Build
@@ -357,9 +353,9 @@ oc secrets link default quay-pull-secret --for=pull -n openshift-machine-api
 
 ---
 
-### 2. Application Manifests (`webhook-deployment.yaml`)
+### 2. Application Manifests (`webhook-deployment.yml`)
 
-This bundle provisions the workload, network endpoints, security policies, and TLS certificate generation.
+This bundle provisions the workload, network endpoints, security policies, and TLS certificate generation for the Mutating Admission Webhook.
 
 ```yaml
 apiVersion: apps/v1  
@@ -423,7 +419,7 @@ spec:
     # Prevents "context deadline exceeded (10s timeout)" errors during API interception.
     - ports:  
         - protocol: TCP  
-          port: 8443  
+          port: 8443
   policyTypes:  
     - Ingress  
 ```
@@ -438,7 +434,7 @@ spec:
 
 ---
 
-### 3. Mutating Webhook Registration (`webhook-config.yaml`)
+### 3. Mutating Webhook Registration (`webhook-config.yml`)
 
 Registers the admission endpoint with the OpenShift Control Plane.
 
@@ -474,14 +470,335 @@ For the Kubernetes API Server to validate the TLS certificate presented by `mach
 
 ---
 
+### 4.  Watcher Application Manifests (`watcher-and-job-rbac.yml`)
+
+Create an application namespace for the Watcher app.  Create ServiceAccounts for the Watcher application to monitor for new nodes and for AAP to update Machine and Node objects.  Create a ConfigMap for the Python script to watch for node new nodes.  Create the Deployment to run the Watcher app.
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: autoscale-node-automation
+  labels:
+    openshift.io/cluster-monitoring: "true"
+---
+# ==============================================================================
+# SERVICE ACCOUNT & RBAC FOR THE WATCHER DEPLOYMENT
+# Allows watcher to stream Node events and spawn onboarding Jobs
+# ==============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: node-readiness-watcher-sa
+  namespace: autoscale-node-automation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-readiness-watcher-role
+rules:
+  # Permission to watch Node state cluster-wide
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  # Permission to create and manage onboarding Jobs in autoscale-node-automation
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: node-readiness-watcher-binding
+subjects:
+  - kind: ServiceAccount
+    name: node-readiness-watcher-sa
+    namespace: autoscale-node-automation
+roleRef:
+  kind: ClusterRole
+  name: node-readiness-watcher-role
+  apiGroup: rbac.authorization.k8s.io
+---
+# ==============================================================================
+# SERVICE ACCOUNT & RBAC FOR AAP (USED BY ANSIBLE TO UNTAINT NODES/MACHINES)
+# Service Account used by AAP to authenticate back to OpenShift
+# ==============================================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aap-node-management-sa
+  namespace: autoscale-node-automation
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aap-node-management-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: ["machine.openshift.io"]
+    resources: ["machines"]
+    verbs: ["get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aap-node-management-binding
+subjects:
+  - kind: ServiceAccount
+    name: aap-node-management-sa
+    namespace: autoscale-node-automation
+roleRef:
+  kind: ClusterRole
+  name: aap-node-management-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aap-node-management-token
+  namespace: autoscale-node-automation
+  annotations:
+    kubernetes.io/service-account.name: aap-node-management-sa
+type: kubernetes.io/service-account-token
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aap-secret
+  namespace: autoscale-node-automation
+type: Opaque
+stringData:
+  token: "<AAP_AUTH_TOKEN>"
+---
+# ==============================================================================
+# WATCHER SCRIPT
+# ==============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-readiness-watcher-script
+  namespace: autoscale-node-automation
+data:
+  watcher.py: |
+    import os
+    import time
+    import logging
+    from kubernetes import client, config, watch
+
+    # Configure logging
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    # Load cluster config
+    try:
+        config.load_incluster_config()
+    except Exception:
+        config.load_kube_config()
+
+    v1 = client.CoreV1Api()
+    batch_v1 = client.BatchV1Api()
+
+    # Environment settings
+    WATCHER_NAMESPACE = os.getenv("WATCHER_NAMESPACE", "autoscale-node-automation")
+    AAP_HOST = os.getenv("AAP_HOST", "aap.ipa.mikea.net")
+    WORKFLOW_ID = os.getenv("WORKFLOW_ID", "38")
+    TAINT_KEY = "network.zero-trust.io/firewall-unverified"
+
+    processed_nodes = set()
+
+    def is_node_ready(node):
+        """Check if Node condition status is Ready == True."""
+        for condition in node.status.conditions or []:
+            if condition.type == "Ready" and condition.status == "True":
+                return True
+        return False
+
+    def has_quarantine_taint(node):
+        """Check if node contains the quarantine taint."""
+        for taint in node.spec.taints or []:
+            if taint.key == TAINT_KEY:
+                return True
+        return False
+
+    def get_node_ip(node):
+        """Extract InternalIP address from Node status."""
+        for addr in node.status.addresses or []:
+            if addr.type == "InternalIP":
+                return addr.address
+        return None
+
+    def trigger_onboarding_job(node_name, node_ip):
+        """Spawn a Kubernetes Job that mounts token from aap-secret and triggers AAP."""
+        job_manifest = {
+            "apiVersion": "batch/v1",
+            "kind": "Job",
+            "metadata": {
+                "name": f"aap-onboard-{node_name}",
+                "namespace": WATCHER_NAMESPACE,
+                "labels": {"app": "aap-node-onboarding"}
+            },
+            "spec": {
+                "backoffLimit": 0,
+                "ttlSecondsAfterFinished": 300,
+                "template": {
+                    "metadata": {
+                        "labels": {"app": "aap-node-onboarding"}
+                    },
+                    "spec": {
+
+                        "restartPolicy": "Never",
+                        "containers": [{
+                            "name": "aap-trigger",
+                            "image": "registry.access.redhat.com/ubi9/ubi-minimal:latest",
+                            "command": ["/bin/sh", "-c"],
+                            "env": [
+                                {"name": "AAP_HOST", "value": AAP_HOST},
+                                {"name": "WORKFLOW_ID", "value": WORKFLOW_ID},
+                                {"name": "TARGET_NODE", "value": node_name},
+                                {"name": "TARGET_IP", "value": node_ip},
+                                {
+                                    "name": "AAP_TOKEN",
+                                    "valueFrom": {
+                                        "secretKeyRef": {
+                                            "name": "aap-secret",
+                                            "key": "token"
+                                        }
+                                    }
+                                }
+                            ],
+                            "args": [
+                                r"""
+                                echo "========================================="
+                                echo "Starting Onboarding Job for Node: ${TARGET_NODE} (IP: ${TARGET_IP})"
+                                echo "========================================="
+
+                                echo "[+] Calling AAP Workflow Template..."
+
+                                HTTP_CODE=$(curl -k -s -o /tmp/response.json -w "%{http_code}" --connect-timeout 10 --max-time 30 -X POST \
+                                  "https://${AAP_HOST}/api/controller/v2/workflow_job_templates/${WORKFLOW_ID}/launch/" \
+                                  -H "Authorization: Bearer ${AAP_TOKEN}" \
+                                  -H "Content-Type: application/json" \
+                                  -d "{\"extra_vars\": {\"target_node_name\": \"${TARGET_NODE}\", \"target_node_ip\": \"${TARGET_IP}\"}}")
+
+                                echo "AAP Response Code: ${HTTP_CODE}"
+                                echo "AAP Response Body:"
+                                cat /tmp/response.json
+                                echo ""
+
+                                if [ "${HTTP_CODE}" -eq 201 ] || [ "${HTTP_CODE}" -eq 200 ]; then
+                                    echo "[SUCCESS] AAP Workflow launched successfully."
+                                    exit 0
+                                else
+                                    echo "[ERROR] AAP Workflow launch failed with HTTP status: ${HTTP_CODE}"
+                                    exit 1
+                                fi
+                                """
+                            ]
+                        }]
+                    }
+                }
+            }
+        }
+
+        try:
+            batch_v1.create_namespaced_job(namespace=WATCHER_NAMESPACE, body=job_manifest)
+            logging.info(f"Created Job aap-onboard-{node_name} in namespace {WATCHER_NAMESPACE}")
+            processed_nodes.add(node_name)
+        except client.exceptions.ApiException as e:
+            logging.error(f"Failed to create Job for node {node_name}: {e}")
+
+    def main():
+        logging.info(f"Starting Node Readiness Watcher in namespace: {WATCHER_NAMESPACE}...")
+        w = watch.Watch()
+
+        while True:
+            try:
+                for event in w.stream(v1.list_node):
+                    node = event['object']
+                    node_name = node.metadata.name
+
+                    if node_name in processed_nodes:
+                        continue
+
+                    if is_node_ready(node) and has_quarantine_taint(node):
+                        node_ip = get_node_ip(node)
+                        if node_ip:
+                            logging.info(f"Target node READY and TAINTED: {node_name} ({node_ip}). Launching Job...")
+                            trigger_onboarding_job(node_name, node_ip)
+                        else:
+                            logging.warning(f"Node {node_name} is Ready and Tainted, but InternalIP is missing.")
+
+            except Exception as e:
+                logging.error(f"Watcher stream interrupted: {e}. Reconnecting in 5 seconds...")
+                time.sleep(5)
+
+    if __name__ == "__main__":
+        main()
+---
+# ==============================================================================
+# WATCHER DEPLOYMENT
+# Runs Python script from ConfigMap and reads token from aap-secret
+# ==============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-readiness-watcher
+  namespace: autoscale-node-automation
+  labels:
+    app: node-readiness-watcher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: node-readiness-watcher
+  template:
+    metadata:
+      labels:
+        app: node-readiness-watcher
+    spec:
+      serviceAccountName: node-readiness-watcher-sa
+      containers:
+        - name: watcher
+          image: registry.access.redhat.com/ubi9/python-312:latest
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              pip install --quiet kubernetes
+              python -u /app/watcher.py
+          env:
+            - name: WATCHER_NAMESPACE
+              value: "autoscale-node-automation"
+            - name: AAP_HOST
+              value: "aap.ipa.mikea.net"
+            - name: WORKFLOW_ID
+              value: "38"
+            - name: AAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: aap-secret
+                  key: token
+          volumeMounts:
+            - name: script
+              mountPath: /app
+      volumes:
+        - name: script
+          configMap:
+            name: node-readiness-watcher-script
+```
+
+---
+
 ### Apply Manifests
 
 Apply the deployment and registration files to the cluster:
 
 ```bash
-oc apply -f webhook-deployment.yaml  
-oc apply -f webhook-config.yaml  
+oc apply -f webhook-deployment.yml  
+oc apply -f webhook-config.yml  
 ```
+
 
 ## Verification & Testing
 
