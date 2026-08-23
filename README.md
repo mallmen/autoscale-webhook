@@ -614,18 +614,18 @@ spec:
 
 #### Why These Resources Are Configured This Way:
 
-* **Why Provision a New Namespace:**
+* **Why Provision a New Namespace:**  
   The Watcher application is user workload despite operating on system resources.  It is best practice to maintain this application in its own namespace.
 
-* **Why Use ServiceAccounts and Cluster Roles (`node-readiness-watcher-role`,`aap-node-management-role`):**
+* **Why Use ServiceAccounts and Cluster Roles (`node-readiness-watcher-role`,`aap-node-management-role`):**  
   The Watcher application must be able to stream Node events and spawn onboarding Jobs.  AAP must be able to modify Node and Machine resources.
 
-* **Why Use Secrets (`aap-node-management-token`,`aap-secret`):**
+* **Why Use Secrets (`aap-node-management-token`,`aap-secret`):**  
   Creating a secret for the ServiceAccount `aap-node-management-sa` allows for the creation of an API token that will be configured into an AAP credential allowing AAP to make changes to the OpenShift cluster.  Creating a Secret `aap-secret` allows the AAP API token to managed separately and not hardcoded into any manifests or scripts.
 
 ---
 
-### 5.  Watcher Python SCript (`watcher.py`)
+### 5.  Watcher Python Script (`watcher.py`)
 
 ```python
 import os
