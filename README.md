@@ -31,7 +31,7 @@ When the OpenShift Cluster Autoscaler scales worker nodes, newly provisioned nod
   
 ## Overview  
   
-In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot route traffic cleanly until physical or software firewall controllers process the new node IP address. By intercepting node creation at the `Machine` resource layer, this project guarantees that newly launched nodes remain in a quarantined `NoSchedule` state until automated security checks confirm network connectivity.  
+In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot route traffic cleanly until physical or software firewall controllers process the new node IP address. By intercepting node creation at the `Machine` resource layer, this project guarantees that newly launched nodes remain in a quarantined `NoSchedule` state until automated security checks confirm network connectivity. After the node is created, a watcher pod will detect the newly created node and execute a job that uses the AAP API to call a workflow job template that untaints the node for operation.  This workflow can be customized to perform additional work prior to removing the taint.  For example, the firewall for the zero-trust environment can be updated for the newly created node, and the firewall can be validated prior to removing the taint.
   
 ---  
   
@@ -65,13 +65,14 @@ In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot
                                                  | Node Fully Unlocked         |  
                                                  | (Schedules User Workloads)  |  
                                                  +-----------------------------+  
+
 ```
 
 ### 3-Step Zero-Trust Lifecycle
 
 1. **Node Interception & Quarantine:** The Webhook mutates new Machine resources to apply `network.zero-trust.io/firewall-unverified=true:NoSchedule`.
-2. **Firewall Automation:** The machine boots and enters `Running` status. An automation controller detects the assigned IP and configures external firewall rules.
-3. **Validation & Release:** A verification DaemonSet tolerates the taint, runs connectivity probes, and removes the taint once network access is verified.
+2. **Node Discovery:** A watcher pod detects the newly configured and ready node and executes an OpenShift job to call a workflow job template using the AAP API.
+3. **Firewall Automation, Validation, and Release:** The AAP workflow updates the firewall rules, validates the rules are working, and releases the node by removing the taint.
 
 ## Key Features
 
@@ -79,17 +80,27 @@ In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot
 - **Automated TLS Integration:** Leverages OpenShift's native service-ca operator to handle certificate generation, signing, and CA bundle injection.
 - **Strict Security Compliance:** Configured with explicit NetworkPolicy ingress rules to function inside OpenShift's default-deny `openshift-machine-api` namespace.
 - **Defensive Runtime:** Guarded against nil-pointer panics caused by health probes or malformed API requests.
+- **
 
 ## Project Structure
 
 ```plaintext
 webhook-project/  
-├── main.go                 # Go HTTP server handling AdmissionReview logic  
-├── go.mod                  # Go module definition (v1.22+)  
-├── go.sum                  # Dependency lockfile  
-├── Dockerfile              # Multi-stage UBI build configuration  
-├── webhook-deployment.yaml # Kubernetes Deployment, Service, and NetworkPolicy  
-└── webhook-config.yaml     # MutatingWebhookConfiguration manifest  
+├── Containerfile                    # Containerfile to build Go HTTP server container
+├── main.go                          # Go HTTP server handling AdmissionReview logic  
+├── go.mod                           # Go module definition (v1.22+)  
+├── go.sum                           # dependency lockfile  
+├── manifests                        # 
+│    └── aap-sa-secret.yml           # OpenShift deployment, service, and networkPolicy  
+│    └── aap-secret.yml              # OpenShift deployment, service, and networkPolicy  
+│    └── namespace.yml               # OpenShift deployment, service, and networkPolicy  
+│    └── watcher-and-job-rbac.yml    # OpenShift deployment, service, and networkPolicy  
+│    └── webhook-deployment.yml      # OpenShift deployment, service, and networkPolicy  
+│    └── webhook-config.yml.yml      # OpenShift mutatingwebhookconfiguration manifest
+├── playbooks                        # 
+│    └── remove-autoscale-taint.yml  # Ansible playbook to remove machine and node taint
+├── README.md                        # project documentation
+└── watcher.py                       # Python script watching OpenShift resources and triggering autoscale logic
 ```
 
 ## Prerequisites
