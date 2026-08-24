@@ -1,0 +1,23 @@
+---
+name: Validate firewall for OpenShift node
+hosts: localhost
+connection: local
+
+tasks:
+  - name: Check correct data is provided
+    assert:
+      - target_node_name is defined
+      - target_node_name | length > 0
+      - target_node_ip is defined
+      - target_node_ip | length > 0
+    fail_msg: >-
+      Missing required extra variables!
+      You must pass -e "target_node_name=<value> target_node_ip=<value>" when running this playbook.
+    success_msg: "Required variables are available"
+
+  - name: Validate firewall
+    ansible.builtin.debug:
+      msg: >-
+        Validating firewall for:
+          node: "{{ target_node_name }}"
+          ip:   "{{ target_node_ip }}"
