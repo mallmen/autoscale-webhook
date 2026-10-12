@@ -49,10 +49,10 @@ In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot
 ## Architecture & Workflow  
   
 ```text  
-+-----------------------+ 1. Intercept CREATE +-----------------------------+  
-| Cluster Autoscaler    | -------------------> | Mutating Webhook Server     |  
-| (Machine API)         |                      | (Injects Zero-Trust Taint)  |  
-+-----------------------+                      +-----------------------------+  
++-----------------------+ 1. CREATE new node with NoSchedule Taint
+| Cluster Autoscaler    | 
+| (Machine API)         | 
++-----------------------+ 
            |  
            v 2. Commit Spec  
  +-----------------------------+  
@@ -96,14 +96,14 @@ In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot
 
 ```plaintext
 autoscale-webhook/  
-├── Containerfile                    # Containerfile to build Go HTTP server container
-├── main.go                          # Go HTTP server handling AdmissionReview logic  
-├── go.mod                           # Go module definition (v1.22+)  
-├── go.sum                           # dependency lockfile  
+├── Containerfile                    # ~~Containerfile to build Go HTTP server container~~ Ignore
+├── main.go                          # ~~Go HTTP server handling AdmissionReview logic~~ Ignore
+├── go.mod                           # ~~Go module definition (v1.22+)~~ Ignore  
+├── go.sum                           # ~~dependency lockfile~~ Ignore
 ├── manifests                        # 
 │    └── watcher-and-job-rbac.yml    # OpenShift namespace, serviceaccounts, rbac, and deployment  
-│    └── webhook-deployment.yml      # OpenShift deployment, service, and networkPolicy  
-│    └── webhook-config.yml.yml      # OpenShift mutatingwebhookconfiguration manifest
+│    └── webhook-deployment.yml      # ~~OpenShift deployment, service, and networkPolicy~~ Ignore  
+│    └── webhook-config.yml.yml      # ~~OpenShift mutatingwebhookconfiguration manifest~~ Ignore
 ├── playbooks                        # 
 │    └── remove-autoscale-taint.yml  # Ansible playbook to remove machine and node taint
 └── README.md                        # project documentation
@@ -118,8 +118,7 @@ autoscale-webhook/
 
 ## Step 1: MachineSet modification
 
-Apply a custom Taint to the worker `MachineSet`.  Make sure to use a name for the taint that would not otherwise be used.  This taints the node with a key that indicates a newly create node waiting for firewall updates.
-
+Apply a custom Taint to the worker `MachineSet`.
 ```bash
 $ oc project openshift-machine-api
 
@@ -138,6 +137,8 @@ taints:
       value: "true"
       effect: NoSchedule
 ```
+> [!WARNING]
+> Make sure this taint is unique and is not used for node troubleshooting.  If this value is not unique, this may disrupt normal cluster operations.
 ---
 
 ### 2.  Watcher Application Manifests (`watcher-and-job-rbac.yml`)
@@ -233,19 +234,15 @@ spec:
             name: node-readiness-watcher-script
 ```
 > [!TIP]
-> Change `image` to the desired image location.  The example uses a free Red Hat Python image.  To use an image from a local registry, update this line.
+> In the `node-readiness-watcher` Deployment, change `image` to the desired image location.  The example uses a free Red Hat Python image.  To use an image from a local registry, update this line.
 
 #### Why These Resources Are Configured This Way:
 
 * **Why Provision a New Namespace:**  
   The Watcher application is user workload despite operating on system resources.  It is best practice to maintain this application in its own namespace.
 
-* **Why Use ServiceAccounts and Cluster Roles (`node-readiness-watcher-role`,`aap-node-management-role`):**  
-  The Watcher application must be able to stream Node events and spawn onboarding Jobs.  AAP must be able to modify Node and Machine resources.
-
-* **Why Use Secrets (`aap-node-management-token`,`aap-secret`):**  
-  Creating a secret for the ServiceAccount `aap-node-management-sa` allows for the creation of an API token that will be configured into an AAP credential allowing AAP to make changes to the OpenShift cluster.  Creating a Secret `aap-secret` allows the AAP API token to managed separately and not hardcoded into any manifests or scripts.
-
+* **Why Use ServiceAccounts and Cluster Roles (`node-readiness-watcher-role`):**  
+  The Watcher application must be able to stream Node events and spawn onboarding Jobs.
 ---
 
 ### 5.  Watcher Python Script (`watcher.py`)
@@ -405,7 +402,8 @@ def main():
 if __name__ == "__main__":
     main()
 ```
-
+> [!TIP]
+> In the `trigger_onboarding_job` function, when defining `spec.template.spec.containers` for the `job_manifest`, name the container something appropriate for the function.  Update the image as needed to use a local image if necessary.  The Red Hat `ubi9/ubi-minimal:latest` image is used for the small footprint and because it provides `curl` which is used for the API call.
 
 #### Why `watcher.py` is Managed as a Standalone File:
 
@@ -414,13 +412,6 @@ Managing the `watcher.py` Python script as a separate file allows it to be maint
 ---
 
 ### Apply Manifests
-
-Apply the Webhook deployment and registration files to the cluster:
-
-```bash
-oc apply -f webhook-deployment.yml  
-oc apply -f webhook-config.yml  
-```
 
 Create the watcher namespace:
 
@@ -447,15 +438,6 @@ Restart the deployment to mount the watcher script:
 oc rollout restart deployment/node-readiness-watcher -n autoscale-node-automation
 ```
 
-Retrieve the ServceAccount API token for the AAP credential:
-
-```bash
-oc get secret aap-node-management-token -n autoscale-node-automation \
-  -o jsonpath='{.data.token}' | base64 --decode
-```
-
-Create an `OpenShift or Kubernetes API Bearer Token` Credential in AAP.  Set the `OpenShift or Kubernetes API Endpoint` to the cluster API endpoint, and paste the decoded token in `API authenticated bearer token`.
-
 ## Verification & Testing
 
 ### 1. Tail Webhook Application Logs
@@ -464,7 +446,7 @@ Create an `OpenShift or Kubernetes API Bearer Token` Credential in AAP.  Set the
 oc logs -f -l app=machine-taint-webhook -n openshift-machine-api  
 oc logs -f deployment/node-readiness-watcher -n autoscale-node-automation
 oc get jobs -n autoscale-node-automation -w
-oc lops -n autoscale-node-automation -l app=app-node-onboarding -f
+oc logs -n autoscale-node-automation -l app=app-node-onboarding -f
 ```
 
 ### 2. Scale Up Worker MachineSet
@@ -479,10 +461,10 @@ Observe new machine creation and verify the `network.zero-trust.io/firewall-unve
 
 ```bash
 # Get newly provisioning machine  
-oc get machines -n openshift-machine-api  
+oc get machines.machine -n openshift-machine-api  
   
 # Inspect taints section  
-oc get machine <NEW_MACHINE_NAME> -n openshift-machine-api -o yaml | grep -A 5 taints  
+oc get machines.machine <NEW_MACHINE_NAME> -n openshift-machine-api -o yaml | grep -A 5 taints  
 ```
 
 Expected Output:
