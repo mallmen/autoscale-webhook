@@ -18,19 +18,11 @@ When the OpenShift Cluster Autoscaler scales worker nodes, newly provisioned nod
 - [Key Features](#key-features)
 - [Project Structure](#project-structure)
 - [Prerequisites](#prerequisites)
-- [Step 1: Webhook Implementation & Build](#step-1-webhook-implementation--build)
-  - [1. Initialize Go Module & Dependencies (`go.mod` & `go.sum`)](#1-initialize-go-module--dependencies-gomod--gosum)
-  - [2. Go Source Code (`main.go`)](#2-go-source-code-maingo)
-  - [3. Multi-Stage Container Build (`Dockerfile`)](#3-multi-stage-container-build-dockerfile)
-  - [4. Build and Push Container Image](#4-build-and-push-container-image)
-- [Step 2: Deployment & Configuration](#step-2-deployment--configuration)
-  - [Manifest Breakdown & Architectural Requirements](#manifest-breakdown--architectural-requirements)
-  - [1. Cluster Pull Credentials](#1-cluster-pull-credentials)
-  - [2. Application Manifests (`webhook-deployment.yml`)](#2-application-manifests-webhook-deploymentyml)
-  - [3. Mutating Webhook Registration (`webhook-config.yml`)](#3-mutating-webhook-registration-webhook-configyml)
-  - [4. Watcher Application Manifests (`watcher-and-job-rbac.yml`)](#4--watcher-application-manifests-watcher-and-job-rbacyml)
-  - [5. Watcher Python Script (`watcher.py`)](#5--watcher-python-script-watcherpy)
-  - [Apply Manifests](#apply-manifests)
+- [Solution](#solution)
+  - [1. MachineSet modification](#machineset-modification)
+  - [2. Watcher Application Manifests (`watcher-and-job-rbac.yml`)](#2--watcher-application-manifests-watcher-and-job-rbacyml)
+  - [3. Watcher Python Script (`watcher.py`)](#5--watcher-python-script-watcherpy)
+  - [4. Apply Manifests](#apply-manifests)
 - [Verification & Testing](#verification--testing)
   - [1. Tail Webhook Application Logs](#1-tail-webhook-application-logs)
   - [2. Scale Up Worker MachineSet](#2-scale-up-worker-machineset)
@@ -110,7 +102,9 @@ autoscale-webhook/
 - Container engine (`podman` or `docker`).
 - Access to an enterprise container registry (e.g., Quay.io).
 
-## Step 1: MachineSet modification
+## Solution
+
+### 1.  MachineSet modification
 
 Apply a custom Taint to the worker `MachineSet`.
 ```bash
@@ -239,7 +233,7 @@ spec:
   The Watcher application must be able to stream Node events and spawn onboarding Jobs.
 ---
 
-### 5.  Watcher Python Script (`watcher.py`)
+### 3.  Watcher Python Script (`watcher.py`)
 
 ```python
 import os
@@ -405,7 +399,7 @@ Managing the `watcher.py` Python script as a separate file allows it to be maint
 
 ---
 
-### Apply Manifests
+### 4.  Apply Manifests
 
 Create the watcher namespace:
 
