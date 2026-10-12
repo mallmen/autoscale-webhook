@@ -96,14 +96,8 @@ In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot
 
 ```plaintext
 autoscale-webhook/  
-├── Containerfile                    # ~~Containerfile to build Go HTTP server container~~ Ignore
-├── main.go                          # ~~Go HTTP server handling AdmissionReview logic~~ Ignore
-├── go.mod                           # ~~Go module definition (v1.22+)~~ Ignore  
-├── go.sum                           # ~~dependency lockfile~~ Ignore
 ├── manifests                        # 
 │    └── watcher-and-job-rbac.yml    # OpenShift namespace, serviceaccounts, rbac, and deployment  
-│    └── webhook-deployment.yml      # ~~OpenShift deployment, service, and networkPolicy~~ Ignore  
-│    └── webhook-config.yml.yml      # ~~OpenShift mutatingwebhookconfiguration manifest~~ Ignore
 ├── playbooks                        # 
 │    └── remove-autoscale-taint.yml  # Ansible playbook to remove machine and node taint
 └── README.md                        # project documentation
