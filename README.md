@@ -42,7 +42,7 @@ When the OpenShift Cluster Autoscaler scales worker nodes, newly provisioned nod
   
 ## Overview  
   
-In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot route traffic cleanly until physical or software firewall controllers process the new node IP address. By intercepting node creation at the `Machine` resource layer, this project guarantees that newly launched nodes remain in a quarantined `NoSchedule` state until automated security checks confirm network connectivity. After the node is created, a watcher pod will detect the newly created node and execute a job that uses the AAP API to call a workflow job template that untaints the node for operation.  This workflow can be customized to perform additional work prior to removing the taint.  For example, the firewall for the zero-trust environment can be updated for the newly created node, and the firewall can be validated prior to removing the taint.
+In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot route traffic cleanly until physical or software firewall controllers process the new node IP address. By modifying the `worker` MachineSet, all newly created nodes come online with a `NoSchedule` taint. After the node is created and ready, a watcher pod will detect the newly created node and execute a job that uses the AAP API to call a workflow job template that untaints the node for operation.  This workflow can be customized to perform additional work prior to removing the taint.  For example, the firewall for the zero-trust environment can be updated for the newly created node, and the firewall can be validated prior to removing the taint.
   
 ---  
   
@@ -81,7 +81,7 @@ In zero-trust environments, worker nodes booted by the Cluster Autoscaler cannot
 
 ### 3-Step Zero-Trust Lifecycle
 
-1. **Node Interception & Quarantine:** The Webhook mutates new Machine resources to apply `network.zero-trust.io/firewall-unverified=true:NoSchedule`.
+1. **Node Creation & Quarantine:** The worker MachineSet creates new Machine resources to apply `network.zero-trust.io/firewall-unverified=true:NoSchedule`.
 2. **Node Discovery:** A watcher pod detects the newly configured and ready node and executes an OpenShift job to call a workflow job template using the AAP API.
 3. **Firewall Automation, Validation, and Release:** The AAP workflow updates the firewall rules, validates the rules are working, and releases the node by removing the taint.
 
@@ -114,374 +114,33 @@ autoscale-webhook/
 - OpenShift Cluster (v4.x) with `cluster-admin` access.
 - OpenShift CLI (`oc`) installed.
 - Container engine (`podman` or `docker`).
-- Go programming tools installed for initial build
 - Access to an enterprise container registry (e.g., Quay.io).
 
-## Step 1: Webhook Implementation & Build
+## Step 1: MachineSet modification
 
-### 1. Initialize Go Module & Dependencies (`go.mod` & `go.sum`)
-
-Before compiling or building the container image, initialize the Go module and download the Kubernetes admission library dependencies to generate `go.mod` and `go.sum`.
+Apply a custom Taint to the worker `MachineSet`.  Make sure to use a name for the taint that would not otherwise be used.  This taints the node with a key that indicates a newly create node waiting for firewall updates.
 
 ```bash
-# Initialize the Go module
-go mod init autoscale-webhook
+$ oc project openshift-machine-api
 
-# Add required Kubernetes & OpenShift API dependencies
-go get k8s.io/api/admission/v1 \
-       k8s.io/apimachinery/pkg/apis/meta/v1 \
-       k8s.io/apimachinery/pkg/runtime \
-       k8s.io/apimachinery/pkg/runtime/serializer
+$ oc get machinesets.machines
+NAME                  DESIRED   CURRENT   READY   AVAILABLE   AGE
+ocp4-crg55-worker-0   0         0                             39d
+ocp4-crg55-worker-1   3         3         3       3           31d
 
-# Tidy and generate the go.sum dependency lockfile
-go mod tidy
+$ oc edit machinesets.machines ocp4-crg55-worker-1
 ```
-
-> [!NOTE]
-> Download the built artifacts or run these steps manually to ensure the files are up to date.
-
----
-### 2. Go Source Code (`main.go`)
-
-The handler unmarshals incoming AdmissionReview requests, validates payload integrity, and generates a JSON Patch adding the quarantine taint:
-
-```go
-package main  
-  
-import (  
-	"encoding/json"  
-	"io"  
-	"log"  
-	"net/http"  
-  
-	admissionv1 "k8s.io/api/admission/v1"  
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"  
-	"k8s.io/apimachinery/pkg/runtime"  
-	"k8s.io/apimachinery/pkg/runtime/serializer"  
-)  
-  
-var (  
-	runtimeScheme = runtime.NewScheme()  
-	codecs        = serializer.NewCodecFactory(runtimeScheme)  
-	deserializer  = codecs.UniversalDeserializer()  
-)  
-  
-type MachineSpec struct {  
-	Taints []Taint `json:"taints,omitempty"`  
-}  
-  
-type Machine struct {  
-	Spec MachineSpec `json:"spec"`  
-}  
-  
-type Taint struct {  
-	Key    string `json:"key"`  
-	Value  string `json:"value"`  
-	Effect string `json:"effect"`  
-}  
-  
-type PatchOperation struct {  
-	Op    string      `json:"op"`  
-	Path  string      `json:"path"`  
-	Value interface{} `json:"value,omitempty"`  
-}  
-  
-func mutateHandler(w http.ResponseWriter, r *http.Request) {  
-	log.Println("Received admission review request")  
-  
-	body, err := io.ReadAll(r.Body)  
-	if err != nil {  
-		log.Printf("Error reading request body: %v", err)  
-		http.Error(w, "Failed to read request body", http.StatusBadRequest)  
-		return  
-	}  
-  
-	admissionReview := admissionv1.AdmissionReview{}  
-	if _, _, err := deserializer.Decode(body, nil, &admissionReview); err != nil {  
-		log.Printf("Error decoding admission review: %v", err)  
-		http.Error(w, "Failed to decode admission review", http.StatusBadRequest)  
-		return  
-	}  
-  
-	req := admissionReview.Request  
-	if req == nil {  
-		log.Println("Error: AdmissionReview request field is nil")  
-		http.Error(w, "AdmissionReview request object missing", http.StatusBadRequest)  
-		return  
-	}  
-  
-	if len(req.Object.Raw) == 0 {  
-		log.Println("Error: AdmissionReview request Object.Raw is empty")  
-		http.Error(w, "AdmissionReview raw object missing", http.StatusBadRequest)  
-		return  
-	}  
-  
-	log.Printf("Intercepted creation request for Machine: %s/%s", req.Namespace, req.Name)  
-  
-	var machine Machine  
-	if err := json.Unmarshal(req.Object.Raw, &machine); err != nil {  
-		log.Printf("Error unmarshaling Machine object: %v", err)  
-		http.Error(w, "Failed to unmarshal Machine object", http.StatusBadRequest)  
-		return  
-	}  
-  
-	targetTaint := Taint{  
-		Key:    "network.zero-trust.io/firewall-unverified",  
-		Value:  "true",  
-		Effect: "NoSchedule",  
-	}  
-  
-	var patches []PatchOperation  
-	if len(machine.Spec.Taints) == 0 {  
-		patches = append(patches, PatchOperation{  
-			Op:    "add",  
-			Path:  "/spec/taints",  
-			Value: []Taint{targetTaint},  
-		})  
-	} else {  
-		patches = append(patches, PatchOperation{  
-			Op:    "add",  
-			Path:  "/spec/taints/-",  
-			Value: targetTaint,  
-		})  
-	}  
-  
-	patchBytes, err := json.Marshal(patches)  
-	if err != nil {  
-		log.Printf("Error marshaling patch: %v", err)  
-		http.Error(w, "Failed to marshal patch", http.StatusInternalServerError)  
-		return  
-	}  
-  
-	patchType := admissionv1.PatchTypeJSONPatch  
-	admissionResponse := &admissionv1.AdmissionResponse{  
-		Allowed:   true,  
-		Patch:     patchBytes,  
-		PatchType: &patchType,  
-	}  
-  
-	responseReview := admissionv1.AdmissionReview{  
-		TypeMeta: metav1.TypeMeta{  
-			APIVersion: "admission.k8s.io/v1",  
-			Kind:       "AdmissionReview",  
-		},  
-		Response: admissionResponse,  
-	}  
-	responseReview.Response.UID = req.UID  
-  
-	respBytes, err := json.Marshal(responseReview)  
-	if err != nil {  
-		log.Printf("Error marshaling response: %v", err)  
-		http.Error(w, "Failed to marshal response", http.StatusInternalServerError)  
-		return  
-	}  
-  
-	log.Println("Successfully generated taint patch and responded to API server")  
-	w.Header().Set("Content-Type", "application/json")  
-	w.Write(respBytes)  
-}  
-  
-func main() {  
-	http.HandleFunc("/mutate", mutateHandler)  
-	log.Println("Starting mutating webhook server on port 8443...")  
-	if err := http.ListenAndServeTLS(":8443", "/etc/webhook/certs/tls.crt", "/etc/webhook/certs/tls.key", nil); err != nil {  
-		log.Fatalf("Failed to listen and serve: %v", err)  
-	}  
-}  
-```
-
-### 3. Multi-Stage Container Build (`Dockerfile`)
-
-Builds using Red Hat Enterprise Linux UBI Toolset and outputs a UBI Minimal runtime image:
-
-```dockerfile
-# Stage 1: Build binary using Red Hat Go Toolset  
-FROM registry.access.redhat.com/ubi9/go-toolset:latest AS builder  
-WORKDIR /opt/app-root/src  
-  
-COPY go.mod go.sum ./  
-RUN go mod download  
-  
-COPY main.go ./  
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o webhook main.go  
-  
-# Stage 2: Create minimal runtime image  
-FROM registry.access.redhat.com/ubi9/ubi-minimal:latest  
-WORKDIR /  
-  
-COPY --from=builder /opt/app-root/src/webhook /webhook  
-  
-USER 65532:65532  
-ENTRYPOINT ["/webhook"]  
-```
-
-### 4. Build and Push Container Image
-
-```bash
-# Set target registry tag  
-REGISTRY_URL="quay.io/your-org/machine-taint-webhook:latest"  
-  
-# Build and push container  
-podman build -t ${REGISTRY_URL} .  
-podman push ${REGISTRY_URL}  
-```
-
-> [!NOTE]
-> Set REGISTRY_URL to your container registry.
-
-## Step 2: Deployment & Configuration
-
-Deploying the webhook into the `openshift-machine-api` namespace requires specific OpenShift annotations and network policies to ensure secure HTTPS communication and cluster connectivity.
-
-### Manifest Breakdown & Architectural Requirements
-
-| Component | Resource | Purpose & Why It Is Required |
-| :--- | :--- | :--- |
-| **Pull Credentials** | `Secret` & `ServiceAccount` | Authorizes pod image pulls from private registries. Linking to the `default` ServiceAccount avoids inline `imagePullSecrets` modifications. |
-| **Webhook Service Annotation** | `Service` | **Required for TLS Certificate Generation:** Annotating the Service with `service.beta.openshift.io/serving-cert-secret-name` triggers OpenShift's `service-ca` operator to automatically generate a TLS cert/key pair in Secret `machine-taint-webhook-tls`. |
-| **Ingress NetworkPolicy** | `NetworkPolicy` | **Required for Network Access:** The `openshift-machine-api` namespace enforces strict default-deny network rules. Without explicitly permitting ingress TCP traffic on port `8443`, calls from the API server hit a 10s deadline timeout. |
-| **MutatingWebhook Registration** | `MutatingWebhookConfiguration` | **Required for CA Trust Chain:** Intercepts `CREATE` operations on `Machine` resources. Annotated with `service.beta.openshift.io/inject-cabundle: "true"` so OpenShift automatically populates the `caBundle` trust field. |
-
----
-
-### 1. Cluster Pull Credentials
-
-Create the pull secret in `openshift-machine-api` and link it to the default `ServiceAccount`:
-
-```bash
-oc create secret docker-registry quay-pull-secret \  
-  --docker-server=quay.io \  
-  --docker-username="<YOUR_QUAY_USERNAME>" \  
-  --docker-password="<YOUR_QUAY_TOKEN>" \  
-  --docker-email="<YOUR_EMAIL>" \  
-  -n openshift-machine-api  
-  
-oc secrets link default quay-pull-secret --for=pull -n openshift-machine-api  
-```
-
-> [!NOTE]
-> Create this secret as approprirate for your container registry.  If the repository is public, skip this step.
-
----
-
-### 2. Application Manifests (`webhook-deployment.yml`)
-
-This bundle provisions the workload, network endpoints, security policies, and TLS certificate generation for the Mutating Admission Webhook.
+Add the taint to `spec.template.spec`.
 
 ```yaml
-apiVersion: apps/v1  
-kind: Deployment  
-metadata:  
-  name: machine-taint-webhook  
-  namespace: openshift-machine-api  
-  labels:  
-    app: machine-taint-webhook  
-spec:  
-  replicas: 2  
-  selector:  
-    matchLabels:  
-      app: machine-taint-webhook  
-  template:  
-    metadata:  
-      labels:  
-        app: machine-taint-webhook  
-    spec:  
-      containers:  
-        - name: webhook  
-          image: quay.io/your-org/machine-taint-webhook:latest  
-          ports:  
-            - containerPort: 8443  
-          volumeMounts:  
-            - name: webhook-certs  
-              mountPath: /etc/webhook/certs  
-              readOnly: true  
-      volumes:  
-        - name: webhook-certs  
-          secret:  
-            secretName: machine-taint-webhook-tls  
----  
-apiVersion: v1  
-kind: Service  
-metadata:  
-  name: machine-taint-webhook-service  
-  namespace: openshift-machine-api  
-  annotations:  
-    # REQUIRED: Tells OpenShift service-ca operator to create secret "machine-taint-webhook-tls" 
-    # containing signed tls.crt and tls.key files.
-    service.beta.openshift.io/serving-cert-secret-name: machine-taint-webhook-tls  
-spec:  
-  ports:  
-    - port: 443  
-      targetPort: 8443  
-  selector:  
-    app: machine-taint-webhook  
----  
-apiVersion: networking.k8s.io/v1  
-kind: NetworkPolicy  
-metadata:  
-  name: allow-ingress-machine-webhook  
-  namespace: openshift-machine-api  
-spec:  
-  podSelector:  
-    matchLabels:  
-      app: machine-taint-webhook  
-  ingress:  
-    # REQUIRED: Opens port 8443 through openshift-machine-api default-deny firewall.
-    # Prevents "context deadline exceeded (10s timeout)" errors during API interception.
-    - ports:  
-        - protocol: TCP  
-          port: 8443
-  policyTypes:  
-    - Ingress  
+taints:
+    - key: network.zero-trust.io/firewall-unverified
+      value: "true"
+      effect: NoSchedule
 ```
-
-#### Why These Resources Are Configured This Way:
-
-* **Why Service Annotation is Required (`service.beta.openshift.io/serving-cert-secret-name`):**  
-  Kubernetes Mutating Webhooks **must** communicate over HTTPS. Instead of manually deploying `cert-manager` or managing custom SSL certificates, this annotation instructs OpenShift's internal `service-ca` operator to automatically issue a trusted TLS certificate authority and server certificate, binding them directly to Secret `machine-taint-webhook-tls`. The webhook Deployment then mounts this Secret to `/etc/webhook/certs`.
-
-* **Why NetworkPolicy is Required (`allow-ingress-machine-webhook`):**  
-  Core OpenShift namespaces like `openshift-machine-api` run default-deny NetworkPolicies for platform hardening. Without this `NetworkPolicy` explicitly allowing ingress on port `8443`, packets sent from the Kubernetes API server to the webhook pod are dropped, causing API scale operations to fail with `failed calling webhook: context deadline exceeded`.
-
 ---
 
-### 3. Mutating Webhook Registration (`webhook-config.yml`)
-
-Registers the admission endpoint with the OpenShift Control Plane.
-
-```yaml
-apiVersion: admissionregistration.k8s.io/v1  
-kind: MutatingWebhookConfiguration  
-metadata:  
-  name: machine-taint-injector-webhook  
-  annotations:  
-    # REQUIRED: Tells OpenShift service-ca operator to auto-inject cluster CA bundle into caBundle.
-    service.beta.openshift.io/inject-cabundle: "true"  
-webhooks:  
-  - name: taint-injector.zero-trust.io  
-    rules:  
-      - apiGroups: ["machine.openshift.io"]  
-        apiVersions: ["v1beta1"]  
-        operations: ["CREATE"]  
-        resources: ["machines"]  
-        scope: "Namespaced"  
-    clientConfig:  
-      service:  
-        name: machine-taint-webhook-service  
-        namespace: openshift-machine-api  
-        path: "/mutate"  
-    admissionReviewVersions: ["v1"]  
-    sideEffects: None  
-    failurePolicy: Fail  
-```
-
-#### Why CA Bundle Injection is Required (`service.beta.openshift.io/inject-cabundle`):
-
-For the Kubernetes API Server to validate the TLS certificate presented by `machine-taint-webhook-service`, it requires a valid CA certificate in `clientConfig.caBundle`. Setting this annotation instructs OpenShift to automatically populate the `caBundle` field with the cluster’s internal CA, completing the end-to-end TLS trust chain.
-
----
-
-### 4.  Watcher Application Manifests (`watcher-and-job-rbac.yml`)
+### 2.  Watcher Application Manifests (`watcher-and-job-rbac.yml`)
 
 This bundle provisions a namespace, service accounts, role bindings, and the deployment for the Watcher application that calls the AAP workflow after a new node is provisioned.
 
@@ -525,55 +184,6 @@ roleRef:
   kind: ClusterRole
   name: node-readiness-watcher-role
   apiGroup: rbac.authorization.k8s.io
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: aap-node-management-sa
-  namespace: autoscale-node-automation
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: aap-node-management-role
-rules:
-  - apiGroups: [""]
-    resources: ["nodes"]
-    verbs: ["get", "list", "patch", "update"]
-  - apiGroups: ["machine.openshift.io"]
-    resources: ["machines"]
-    verbs: ["get", "list", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: aap-node-management-binding
-subjects:
-  - kind: ServiceAccount
-    name: aap-node-management-sa
-    namespace: autoscale-node-automation
-roleRef:
-  kind: ClusterRole
-  name: aap-node-management-role
-  apiGroup: rbac.authorization.k8s.io
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: aap-node-management-token
-  namespace: autoscale-node-automation
-  annotations:
-    kubernetes.io/service-account.name: aap-node-management-sa
-type: kubernetes.io/service-account-token
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: aap-secret
-  namespace: autoscale-node-automation
-type: Opaque
-stringData:
-  token: "<AAP_AUTH_TOKEN>"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -622,6 +232,8 @@ spec:
           configMap:
             name: node-readiness-watcher-script
 ```
+> [!TIP]
+> Change `image` to the desired image location.  The example uses a free Red Hat Python image.  To use an image from a local registry, update this line.
 
 #### Why These Resources Are Configured This Way:
 
@@ -793,6 +405,7 @@ def main():
 if __name__ == "__main__":
     main()
 ```
+
 
 #### Why `watcher.py` is Managed as a Standalone File:
 
