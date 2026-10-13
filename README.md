@@ -401,12 +401,6 @@ Managing the `watcher.py` Python script as a separate file allows it to be maint
 
 ### 4.  Apply Manifests
 
-Create the watcher namespace:
-
-```bash
-oc apply -f namespace.yml
-```
-
 Apply the watcher deployment, service account, and rbac manifests:
 
 ```bash
