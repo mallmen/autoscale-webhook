@@ -434,7 +434,7 @@ oc logs -n autoscale-node-automation -l app=app-node-onboarding -f
 ### 2. Scale Up Worker MachineSet
 
 ```bash
-oc scale machineset <WORKER_MACHINESET_NAME> --replicas=4 -n openshift-machine-api  
+oc scale machinesets.machine <WORKER_MACHINESET_NAME> --replicas=4 -n openshift-machine-api  
 ```
 
 ### 3. Verify Taint Injection on Machine Object
