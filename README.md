@@ -110,12 +110,12 @@ Apply a custom Taint to the worker `MachineSet`.
 ```bash
 $ oc project openshift-machine-api
 
-$ oc get machinesets.machines
+$ oc get machinesets.machine
 NAME                  DESIRED   CURRENT   READY   AVAILABLE   AGE
 ocp4-crg55-worker-0   0         0                             39d
 ocp4-crg55-worker-1   3         3         3       3           31d
 
-$ oc edit machinesets.machines ocp4-crg55-worker-1
+$ oc edit machinesets.machine ocp4-crg55-worker-1
 ```
 Add the taint to `spec.template.spec`.
 
